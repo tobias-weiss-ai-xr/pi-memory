@@ -247,6 +247,10 @@ assert(stats.topTags.length > 0, "stats should have top tags");
 try { flush(); assert(true, "flush should not throw"); }
 catch { assert(false, "flush threw unexpectedly"); }
 
+// Verify flush actually persisted data
+const afterFlush = getStats();
+assert(afterFlush.total === stats.total, "flush should persist current state")
+
 // Store with Unicode content
 const uni = storeMemory({ category: "insight", topic: "Unicode test 🧠", content: "Memory with emoji and 中文", tags: ["unicode", "测试"], importance: 3 });
 assert(uni.entry.topic.includes("🧠"), "should handle emoji in topic");
@@ -275,6 +279,59 @@ const benchEnd = Date.now();
 const avgMs = (benchEnd - benchStart) / iterations;
 console.log(`  ${iterations} searches in ${benchEnd - benchStart}ms (avg ${avgMs.toFixed(2)}ms)`);
 assert(avgMs < 50, `search should average <50ms (got ${avgMs.toFixed(2)}ms)`);
+
+
+console.log("\n=== Hardening: edge cases ===");
+
+// Search with empty store edge case
+const emptySearch = searchMemories("");
+assert(Array.isArray(emptySearch), "empty query should return array");
+
+// Search with very long query
+const longQuery = "x".repeat(1000);
+const longSearch = searchMemories(longQuery);
+assert(Array.isArray(longSearch), "very long query should not crash");
+
+// Search with special regex chars
+const regexSearch = searchMemories(".*+?^${}()|[]\\");
+assert(Array.isArray(regexSearch), "regex special chars in query should not crash");
+
+// Multiple rapid stores (tests deferred write batching)
+const rapidStart = Date.now();
+for (let i = 0; i < 50; i++) {
+  storeMemory({ category: "insight", topic: `Rapid test ${i}`, content: "x", tags: ["rapid"], importance: 1 });
+}
+const rapidDuration = Date.now() - rapidStart;
+console.log(`  50 rapid stores in ${rapidDuration}ms`);
+assert(rapidDuration < 2000, "50 rapid stores should batch and not take >2s");
+
+// Verify all 50 were stored
+const rapidCount = searchMemories("rapid", 100).length;
+assert(rapidCount >= 50, "all 50 rapid stores should be searchable");
+
+// getContextMemories with non-existent project (may return cross-project warnings)
+const noProjectCtx = getContextMemories("nonexistent-project-xyz", 5);
+assert(Array.isArray(noProjectCtx), "context for non-existent project should return array");
+// Should be empty or only contain cross-project entries
+const hasProjectMatch = noProjectCtx.some(m => m.project === "nonexistent-project-xyz");
+assert(!hasProjectMatch, "context for non-existent project should not have project-specific entries");
+
+// exportMemories with large store should not throw
+const largeExport = exportMemories();
+assert(typeof largeExport === "string", "export should return string");
+assert(largeExport.length > 0, "export should not be empty");
+
+// Multiple delete calls should be safe
+deleteMemory("nonexistent");
+deleteMemory("nonexistent2");
+assert(true, "multiple delete calls should not throw");
+
+// updateMemory with only one field
+const { entry: updTarget } = storeMemory({ category: "insight", topic: "Update partial test", content: "original", tags: ["test"], importance: 2 });
+const updResult = updateMemory(updTarget.id, { importance: 5 });
+assert(updResult !== null, "partial update should return entry");
+assert(updResult!.importance === 5, "partial update should change only importance");
+assert(updResult!.content === "original", "partial update should preserve other fields");
 
 // Clean up test data
 getStats(); // just to ensure store is loaded

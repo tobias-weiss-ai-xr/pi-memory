@@ -66,7 +66,17 @@ function load(): MemoryStore {
     const raw = fs.readFileSync(STORE_FILE, "utf-8");
     cachedStore = JSON.parse(raw) as MemoryStore;
     return cachedStore;
-  } catch {
+  } catch (err) {
+    // If file exists but is corrupted, back it up before resetting
+    if (fs.existsSync(STORE_FILE)) {
+      const backupDir = path.join(BASE_DIR, "backups");
+      ensureDir(backupDir);
+      const backupPath = path.join(backupDir, `corrupted-${Date.now()}.json`);
+      try {
+        fs.copyFileSync(STORE_FILE, backupPath);
+        console.error(`[pi-memory] Store corrupted, backed up to ${backupPath}`);
+      } catch { /* best-effort backup */ }
+    }
     cachedStore = { entries: [] };
     return cachedStore;
   }
@@ -126,7 +136,7 @@ function generateId(): string {
   return `mem_${(idCounter++).toString(36)}_${Date.now().toString(36)}`;
 }
 
-function detectProject(cwd?: string): string {
+export function detectProject(cwd?: string): string {
   if (!cwd) return "unknown";
   // Try to find git remote, fall back to dirname
   try {

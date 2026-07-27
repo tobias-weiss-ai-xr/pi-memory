@@ -36,21 +36,11 @@ import {
   getTTLDays,
   relevanceScore,
   flush,
+  detectProject,
   type MemoryCategory,
 } from "../src/store.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function detectProject(cwd?: string): string {
-  if (!cwd) return "unknown";
-  try {
-    const { execSync } = require("node:child_process");
-    const remote = execSync("git config --get remote.origin.url", { cwd, encoding: "utf-8", timeout: 3000 }).trim();
-    const match = remote.match(/[\/:]([^\/]+?)(?:\.git)?$/);
-    if (match) return match[1];
-  } catch { /* not a git repo */ }
-  return path.basename(cwd);
-}
 
 function textResult(text: string): AgentToolResult<any> {
   return { content: [{ type: "text" as const, text }], details: {} };
@@ -59,6 +49,9 @@ function textResult(text: string): AgentToolResult<any> {
 // ─── Extension ───────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+
+  // Periodic flush timer: ensures pending writes don't get lost if pi crashes
+  const flushInterval = setInterval(() => { flush(); }, 5000);
 
   // ── Session start: write prompt file (loaded by resources_discover) ──────
   // resources_discover fires after session_start, so the prompt file is written
@@ -100,20 +93,29 @@ export default function (pi: ExtensionAPI) {
     return {};
   });
 
-  // ── Session end: auto-store structured bookmark ───────────────────────────
+  // ── Session end: auto-store enriched bookmark ────────────────────────────
+
+  function getGitBranch(cwd: string): string {
+    try {
+      const { execSync } = require("node:child_process");
+      return execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf-8", timeout: 2000 }).trim();
+    } catch { return ""; }
+  }
 
   pi.on("session_shutdown", async (_event, ctx) => {
     const cwd = ctx.cwd || process.cwd();
     const project = detectProject(cwd);
     const now = new Date().toISOString().slice(0, 10);
+    const branch = getGitBranch(cwd);
+    const branchTag = branch ? `, branch=${branch}` : "";
 
-    // Store a richer session bookmark
+    // Store an enriched session bookmark with git context
     storeMemory({
       category: "session",
-      topic: `Session in ${project} — ${now}`,
-      content: `Session completed in ${project} on ${now}.`
-        + ` Key activities, decisions, and outcomes should be stored as separate entries.`,
-      tags: [project, "session", now],
+      topic: `Session in ${project} — ${now}${branch ? ` (${branch})` : ""}`,
+      content: `Session completed in ${project} on ${now}.${branchTag}`
+        + ` Key activities, decisions, and outcomes should be stored as separate entries using memory_store.`,
+      tags: [project, "session", now, ...(branch ? [branch] : [])],
       importance: 2,
       cwd,
     });
@@ -127,6 +129,7 @@ export default function (pi: ExtensionAPI) {
 
     // Flush pending writes to disk before session exits
     flush();
+    clearInterval(flushInterval);
   });
 
   // ── Register: memory_search tool ───────────────────────────────────────────
