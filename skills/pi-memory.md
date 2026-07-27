@@ -4,7 +4,8 @@ description: Experiential memory — learn from past sessions and persist patter
 
 # Pi Memory
 
-Pi Memory is an experiential memory system that learns from past coding sessions and surfaces relevant prior knowledge.
+Pi Memory is an experiential memory system that learns from past coding sessions
+and surfaces relevant prior knowledge. **Always use it at session start and end.**
 
 ## Tools
 
@@ -28,6 +29,10 @@ memory_store topic="Use Store pattern for state" category=pattern content="Centr
 ### memory_stats
 Check how many memories are stored and their distribution.
 
+```
+memory_stats
+```
+
 ## Categories
 
 | Category | When to Use | Example |
@@ -38,22 +43,79 @@ Check how many memories are stored and their distribution.
 | `warning` | A pitfall to avoid in the future | "UFW blocks Docker → host via external IP" |
 | `todo` | Something to address in a future session | "Add proper error handling to the memory store" |
 
-## Session Lifecycle
+## Session Lifecycle (Mandatory)
 
-- **Session start**: Pi Memory automatically loads relevant memories for the current project
-- **Session end**: A lightweight bookmark is stored automatically
-- **Manual store**: Use `memory_store` during or after significant discoveries
+### 1. Session Start — Retrieve Prior Context
+
+**Always call `memory_search` at the beginning of every session** to load
+relevant prior knowledge. You are NOT automatically given this context —
+you must retrieve it explicitly.
+
+```
+# General: get context for current project
+memory_search query="<current task topic>" project=<project>
+
+# Get high-importance warnings for the project
+memory_search query="" category=warning project=<project>
+
+# Check overall memory stats
+memory_stats
+```
+
+### 2. During Session — Store Discoveries Immediately
+
+When you discover a non-obvious truth, fix a tricky bug, or make an
+architectural decision, **store it right away** — don't wait until the end.
+
+```
+memory_store topic="<descriptive title>" category=insight \
+  content="<what was learned, why it matters, how to reproduce>" \
+  tags="key1,key2,project-name" importance=4
+```
+
+### 3. Session End — Persist Outcomes
+
+**Always call `memory_store` at the end of every session** with a structured
+summary covering: what was done, key decisions, what's left for next time.
+
+```
+memory_store topic="Session: <topic> - <date>" category=decision \
+  content="Completed: <key accomplishments>.\nDecisions: <architectural choices>.\nNext: <what to tackle next>.\nIssues: <known problems>." \
+  tags="session,<project>,<topic>" importance=3
+```
+
+## Project Patterns
+
+When working with **Ansible infrastructure** (this repo), always store:
+
+- Playbook or role changes with `project=ansible`
+- Host-specific configs with tags like `host=<hostname>`
+- Security fixes with tags `security,<cve-or-type>` and importance=4+
+- Docker/container issues with tags `docker,<service>`
+- Monitoring changes with tags `prometheus,grafana,alert`
 
 ## Integration with Graphiti
 
-Pi Memory is for **experiential** memory (coding patterns, lessons learned, decisions).
-Graphiti is for **structured** memory (entities, relationships, cross-agent facts).
-Use both: Graphiti for structured data, Pi Memory for experiential knowledge.
+Pi Memory is for **experiential** memory (coding patterns, lessons learned,
+decisions). Graphiti is for **structured** memory (entities, relationships,
+cross-agent facts). Use both:
+
+- **Graphiti** for structured data about hosts, services, and their relationships
+- **Pi Memory** for experiential knowledge about how things work and gotchas
+
+```
+# Query Graphiti for structured context about a host/service:
+graphiti_search query="<host or service name>"
+
+# Store experiential learning:
+memory_store topic="..." category=insight ...
+```
 
 ## Best Practices
 
-1. Store after every significant discovery or decision
-2. Use specific, searchable topics
-3. Set importance=4 or 5 for critical learnings
-4. Tag generously for better search
-5. Use `memory_stats` at session start to see what's available
+1. **Mandatory**: Call `memory_search` at session start + `memory_store` at session end
+2. **Store immediately** after every significant discovery or decision
+3. Use specific, searchable topics (not generic)
+4. Set importance=4 or 5 for critical learnings (security, data loss risk)
+5. Tag generously: include project, technology, domain
+6. Use `memory_stats` at session start to see what's available
