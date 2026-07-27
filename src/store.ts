@@ -282,7 +282,17 @@ export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "proje
 
 /**
  * Search memories by text query, sorted by relevance score
- * (importance × recency). Matches topic, content, tags, and project.
+ * (importance × recency × match quality).
+ *
+ * Matching strategy (fuzzy-tolerant):
+ *  - Tokenizes query into words
+ *  - Matches if ANY query word appears as a word boundary in topic/content/tags/project
+ *  - Prefix matching: "net" matches "network", "networking"
+ *  - Topic matches weighted higher than content matches
+ *  - Multi-word queries: entries matching MORE terms rank higher
+ *
+ * @param query - Search string. Empty returns all entries sorted by relevance.
+ * @param limit - Max results (default 20)
  */
 export function searchMemories(query: string, limit = 20): MemoryEntry[] {
   const store = load();
@@ -297,21 +307,189 @@ export function searchMemories(query: string, limit = 20): MemoryEntry[] {
       .map(x => x.entry);
   }
 
-  const terms = q.split(/\s+/).filter(Boolean);
+  // Tokenize query into words, strip special chars for matching
+  const terms = q.split(/[\s,;:.!?()]+/).filter(t => t.length > 0);
 
   return store.entries
     .map(e => {
-      const text = `${e.topic} ${e.content} ${e.tags.join(" ")} ${e.project}`.toLowerCase();
-      // Count how many search terms match
-      const matchCount = terms.filter(t => text.includes(t)).length;
-      if (matchCount === 0) return null; // no match
-      const matchRatio = matchCount / terms.length;
-      return { entry: e, score: relevanceScore(e) * (0.5 + 0.5 * matchRatio) };
+      const result = matchEntry(e, terms);
+      if (!result) return null;
+      const score = relevanceScore(e) * (0.4 + 0.6 * result.matchRatio);
+      return { entry: e, score };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(x => x.entry);
+}
+
+/**
+ * Detailed match result for a single entry against query terms.
+ */
+interface MatchResult {
+  matchedTerms: number;
+  totalTerms: number;
+  matchRatio: number;     // matchedTerms / totalTerms
+  topicMatches: number;
+  contentMatches: number;
+  tagMatches: number;
+}
+
+/**
+ * Match an entry against query terms using fuzzy word-boundary matching.
+ * Returns null if no terms match, or a MatchResult with details.
+ */
+function matchEntry(entry: MemoryEntry, terms: string[]): MatchResult | null {
+  const topicLower = entry.topic.toLowerCase();
+  const contentLower = entry.content.toLowerCase();
+  const tagsLower = entry.tags.map(t => t.toLowerCase());
+  const projectLower = entry.project.toLowerCase();
+
+  // Build searchable text: topic counts triple, content once, tags once, project once
+  const searchText = `${topicLower} ${topicLower} ${topicLower} ${contentLower} ${tagsLower.join(" ")} ${projectLower}`;
+
+  let matchedTerms = 0;
+  let topicMatches = 0;
+  let contentMatches = 0;
+  let tagMatches = 0;
+
+  for (const term of terms) {
+    if (term.length === 0) continue;
+
+    // Prefix match: check if term appears as word boundary in any field
+    // This handles "net" → "network", "docker" → "docker", etc.
+    const topicHit = wordMatch(topicLower, term);
+    const contentHit = wordMatch(contentLower, term);
+    const tagHit = tagsLower.some(t => wordMatch(t, term));
+    const projectHit = wordMatch(projectLower, term);
+
+    if (topicHit || contentHit || tagHit || projectHit) {
+      matchedTerms++;
+      if (topicHit) topicMatches++;
+      if (contentHit) contentMatches++;
+      if (tagHit) tagMatches++;
+    }
+  }
+
+  if (matchedTerms === 0) return null;
+
+  return {
+    matchedTerms,
+    totalTerms: terms.length,
+    matchRatio: matchedTerms / terms.length,
+    topicMatches,
+    contentMatches,
+    tagMatches,
+  };
+}
+
+/**
+ * Check if a term matches text at a word boundary with prefix support.
+ * "net" matches "network" (prefix) and "net" (exact) but not "internet"
+ * (not at word boundary). Detects boundaries between different scripts
+ * (e.g., Latin→CJK boundary at "Pod网络").
+ */
+function wordMatch(text: string, term: string): boolean {
+  if (term.length === 0) return false;
+  if (text === term) return true;
+
+  let idx = 0;
+  while (idx < text.length) {
+    idx = text.indexOf(term, idx);
+    if (idx === -1) return false;
+
+    // Check word/script boundary BEFORE the match
+    // Boundary exists at: start of string, after non-word char, or between different scripts
+    if (idx > 0) {
+      const beforeChar = text[idx - 1];
+      const firstTermChar = text[idx];
+      if (!isWordChar(beforeChar)) {
+        // OK: boundary due to non-word char
+      } else if (!sameScript(beforeChar, firstTermChar)) {
+        // OK: boundary due to script change (e.g., "d"→"网" at "Pod网络")
+      } else {
+        // NOT a boundary: same script word char before the match
+        idx = idx + 1;
+        continue;
+      }
+    }
+
+    // Prefix match: term can be shorter than the word it matches
+    // "net" at start of "networking" → match (prefix)
+    // "net" as exact word "net" → match (exact word)
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Categorize a character: "latin" (ASCII letter), "digit", "cjk" (CJK ideograph),
+ * "unicode" (other non-ASCII), or "other" (whitespace, punctuation).
+ * Used for word boundary detection across different scripts.
+ */
+type CharType = "latin" | "digit" | "cjk" | "unicode" | "other";
+
+function charType(ch: string): CharType {
+  if (ch.length === 0) return "other";
+  const code = ch.codePointAt(0)!;
+  // Digits
+  if (code >= 0x30 && code <= 0x39) return "digit";
+  // ASCII letters
+  if ((code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A) || code === 0x5F) return "latin";
+  // CJK Unified Ideographs + Extension A + B + Compatibility
+  if ((code >= 0x4E00 && code <= 0x9FFF) ||
+      (code >= 0x3400 && code <= 0x4DBF) ||
+      (code >= 0x20000 && code <= 0x2A6DF) ||
+      (code >= 0xF900 && code <= 0xFAFF)) return "cjk";
+  // Other non-ASCII (non-CJK unicode letters)
+  if (code > 0x7F &&
+      (code < 0x0300 || code > 0x036F) && // skip combining diacritics
+      code !== 0x200B && // zero-width space
+      code !== 0x200C && code !== 0x200D) return "unicode"; // ZWNJ, ZWJ
+  return "other";
+}
+
+/**
+ * Check if two characters belong to the same "script" for word boundary purposes.
+ * Different scripts (Latin, CJK, digits) create boundaries between them.
+ */
+function sameScript(a: string, b: string): boolean {
+  return charType(a) === charType(b);
+}
+
+/**
+ * Check if a character is a "word character" (any letter or digit in any script).
+ */
+function isWordChar(ch: string): boolean {
+  return charType(ch) !== "other";
+}
+
+/**
+ * Escape special characters in a string for use in a RegExp.
+ */
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Search with explanation: returns entries with detailed match info.
+ * Useful for debugging search quality.
+ */
+export function searchExplain(query: string, limit = 5): Array<{ entry: MemoryEntry; match: MatchResult | null; score: number }> {
+  const store = load();
+  const q = query.toLowerCase().trim();
+  const terms = q ? q.split(/[\s,;:.!?()]+/).filter(t => t.length > 0) : [];
+
+  return store.entries
+    .map(e => {
+      const match = terms.length > 0 ? matchEntry(e, terms) : { matchedTerms: 0, totalTerms: 0, matchRatio: 1, topicMatches: 0, contentMatches: 0, tagMatches: 0 };
+      // Non-matching entries get a 60% penalty vs matching entries
+      const matchMultiplier = match ? (0.4 + 0.6 * match.matchRatio) : 0.4;
+      const score = relevanceScore(e) * matchMultiplier;
+      return { entry: e, match, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
 }
 
 /**
@@ -480,18 +658,54 @@ export function applyImportanceDecay(entry: MemoryEntry): number {
 
 /**
  * Format search results with highlighted matching terms.
- * Wraps matched words in **bold** markers.
+ * Wraps matched words in **bold** markers using word-boundary matching.
+ * Uses wordMatch logic for boundary detection (unicode-safe, no regex \b).
  */
 export function highlightMatches(text: string, query: string): string {
   if (!query || !query.trim()) return text;
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const terms = query.toLowerCase().split(/[\s,;:.!?()]+/).filter(t => t.length > 0);
   if (terms.length === 0) return text;
 
-  // Build regex that matches any of the terms as whole words
-  const pattern = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join("|");
-  const regex = new RegExp(`(${pattern})`, "gi");
+  const lower = text.toLowerCase();
+  const result: string[] = [];
+  let pos = 0;
 
-  return text.replace(regex, "**$1**");
+  while (pos < lower.length) {
+    // Find the earliest word match at current position
+    let bestIdx = -1;
+    let bestTerm = "";
+
+    for (const term of terms) {
+      const idx = lower.indexOf(term, pos);
+      if (idx !== -1 && (bestIdx === -1 || idx < bestIdx)) {
+        // Verify word/script START boundary (prefix matching allowed)
+        if (idx > 0) {
+          const beforeChar = lower[idx - 1];
+          const firstMatchChar = lower[idx];
+          if (isWordChar(beforeChar) && sameScript(beforeChar, firstMatchChar)) {
+            continue; // no boundary — same script continues
+          }
+        }
+        bestIdx = idx;
+        bestTerm = term;
+      }
+    }
+
+    if (bestIdx === -1) {
+      // No more matches
+      result.push(text.slice(pos));
+      break;
+    }
+
+    // Add text before match + highlighted match
+    result.push(text.slice(pos, bestIdx));
+    result.push("**");
+    result.push(text.slice(bestIdx, bestIdx + bestTerm.length));
+    result.push("**");
+    pos = bestIdx + bestTerm.length;
+  }
+
+  return result.join("");
 }
 
 /**

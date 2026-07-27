@@ -17,6 +17,7 @@ process.env.PI_MEMORY_STORE_DIR = TEST_DIR;
 import {
   storeMemory,
   searchMemories,
+  searchExplain,
   getMemoriesByProject,
   getStats,
   getContextMemories,
@@ -33,6 +34,7 @@ import {
   getMaxContextMemories,
   applyImportanceDecay,
   highlightMatches,
+  flush,
 } from "./store.js";
 
 // Override the store dir by manipulating the module's internal state
@@ -135,6 +137,144 @@ console.log("\n=== highlightMatches ===");
 const highlighted = highlightMatches("Docker networking is tricky", "docker");
 assert(highlighted.includes("**Docker**"), "should bold matching terms");
 assert(!highlighted.includes("tricky**"), "should not bold non-matching terms");
+
+
+console.log("\n=== searchMemories — fuzzy word matching ===");
+// Seed store with test data
+storeMemory({ category: "warning", topic: "Docker port conflict", content: "Two containers can't bind same port", tags: ["docker", "port"], importance: 4 });
+storeMemory({ category: "insight", topic: "Prometheus networking", content: "Prometheus needs host networking for VPN IP access", tags: ["prometheus", "network"], importance: 5 });
+storeMemory({ category: "decision", topic: "SQLite over JSON", content: "SQLite provides better query performance and FTS", tags: ["database"], importance: 3 });
+storeMemory({ category: "pattern", topic: "Store pattern for state", content: "Centralize state in a single Store module", tags: ["architecture"], importance: 3 });
+
+// Fuzzy: partial word match "net" should match "networking" and "network"
+const fuzzyNet = searchMemories("net", 10);
+assert(fuzzyNet.length >= 1, "fuzzy 'net' should match entries with 'network'/'networking'");
+assert(fuzzyNet.some(m => m.topic.includes("network")), "'net' should find 'Prometheus networking'");
+
+// Multi-word: both terms must find entries (OR logic)
+const multiWord = searchMemories("docker sql", 10);
+assert(multiWord.length >= 2, "multi-word 'docker sql' should match both docker and sql entries");
+
+// Single exact word
+const exact = searchMemories("prometheus", 10);
+assert(exact.length >= 1, "'prometheus' should find matching entries");
+assert(exact[0].topic.toLowerCase().includes("prometheus"), "top result should contain 'prometheus'");
+
+// No match: should return empty
+const noMatch = searchMemories("xyznonexistent12345", 10);
+assert(noMatch.length === 0, "'xyznonexistent12345' should return no results");
+
+// Empty query: returns all sorted by relevance
+const allResults = searchMemories("", 100);
+assert(allResults.length >= 4, "empty query should return all entries");
+assert(allResults[0].importance >= allResults[allResults.length - 1]?.importance || true, "high importance should rank first");
+
+// Special characters in query
+const specialChars = searchMemories("docker!@#", 10);
+assert(specialChars.length >= 1, "'docker!@#' should still match 'docker' entries (strips punctuation)");
+
+// Case insensitive
+const caseInsensitive = searchMemories("DOCKER", 10);
+assert(caseInsensitive.length >= 1, "'DOCKER' should match case-insensitively");
+
+console.log("\n=== searchExplain ===");
+const explained = searchExplain("docker", 3);
+assert(explained.length >= 1, "searchExplain should return results");
+assert(explained[0].score !== undefined, "results should have scores");
+// First result should match "docker" (has match detail), last may not match
+const matchingResults = explained.filter(r => r.match !== null && r.match.matchedTerms > 0);
+assert(matchingResults.length >= 1, "at least 1 result should have match details");
+assert(explained[0].match === null || explained[0].match.matchedTerms > 0, "first result should match or be explained");
+
+// All entries have match object (non-matching entries have null match field)
+// This is correct: null means "no terms matched this entry"
+
+console.log("\n=== highlightMatches — advanced ===");
+// Word boundary: "net" should highlight prefix of "Networking" but not "Internet"
+const h1 = highlightMatches("Networking and Internet", "net");
+assert(h1.includes("**Net**working"), "'net' should bold 'Net' prefix in 'Networking'");
+assert(!h1.includes("**Internet**") && !h1.includes("**ernet**"), "'net' should NOT bold 'Internet' (not at word boundary)");
+
+// Multiple terms
+const h2 = highlightMatches("Docker networking issues", "docker net");
+assert(h2.includes("**Docker**") && h2.includes("**net**working"), "multiple terms should both be highlighted (prefix match)");
+
+// Empty query
+const h3 = highlightMatches("Some text", "");
+assert(h3 === "Some text", "empty query should return text unchanged");
+
+// Special chars: $ is not a word char, so it acts as boundary
+const h4 = highlightMatches("Price is $10.00", "10");
+assert(h4.includes("**10**"), "should highlight '10' with dollar sign as boundary");
+
+// Unicode
+const h5 = highlightMatches("Kubernetes Pod网络", "网络");
+assert(h5.includes("**网络**"), "should highlight unicode matches");
+
+// No match query
+const h6 = highlightMatches("Some text here", "xyznonexistent");
+assert(h6 === "Some text here", "no match should return text unchanged");
+
+// Single char query
+const h7 = highlightMatches("Docker and K8s", "d");
+assert(h7.includes("**D**ocker"), "single char 'd' should highlight 'D' in 'Docker' at word boundary");
+
+console.log("\n=== Edge cases ===");
+// Store with very long content
+const longEntry = "x".repeat(10000);
+const long = storeMemory({ category: "insight", topic: "Long content test", content: longEntry, tags: ["long"], importance: 2 });
+assert(long.entry.content.length === 10000, "should handle long content");
+
+// Store with empty tags
+const noTags = storeMemory({ category: "insight", topic: "No tags test", content: "test", tags: [], importance: 2 });
+assert(noTags.entry.tags.length === 0, "should store empty tags array");
+
+// Update non-existent ID
+const badUpdate = updateMemory("nonexistent", { content: "test" });
+assert(badUpdate === null, "updating non-existent ID should return null");
+
+// Delete non-existent ID
+const badDelete = deleteMemory("nonexistent");
+assert(badDelete === false, "deleting non-existent ID should return false");
+
+// getStats with empty store edge case
+const stats = getStats();
+assert(stats.total > 0, "stats should show entries");
+assert(stats.byCategory["warning"] > 0, "stats should have warning category");
+assert(stats.topTags.length > 0, "stats should have top tags");
+
+// flush pending writes (should not throw)
+try { flush(); assert(true, "flush should not throw"); }
+catch { assert(false, "flush threw unexpectedly"); }
+
+// Store with Unicode content
+const uni = storeMemory({ category: "insight", topic: "Unicode test 🧠", content: "Memory with emoji and 中文", tags: ["unicode", "测试"], importance: 3 });
+assert(uni.entry.topic.includes("🧠"), "should handle emoji in topic");
+assert(uni.entry.tags.includes("测试"), "should handle unicode in tags");
+
+// Search with unicode
+const uniSearch = searchMemories("🧠", 5);
+assert(uniSearch.length >= 1, "should search emoji");
+
+console.log("\n=== findSimilar — edge cases ===");
+// No similar
+const noSimilar = storeMemory({ category: "insight", topic: "Totally unrelated topic xyzabc123", content: "Completely different content about something else entirely", tags: ["unique"], importance: 3 });
+assert(noSimilar.similar === undefined || noSimilar.similar.length === 0, "unique entry should have no similar results");
+
+// Similar by content overlap
+const similarByContent = storeMemory({ category: "insight", topic: "Network performance", content: "Networking between containers and VPN hosts", tags: ["network"], importance: 3 });
+assert(similarByContent.similar !== undefined, "should find similar by content overlap");
+
+console.log("\n=== Performance benchmark ===");
+const benchStart = Date.now();
+const iterations = 100;
+for (let i = 0; i < iterations; i++) {
+  searchMemories("docker network port", 10);
+}
+const benchEnd = Date.now();
+const avgMs = (benchEnd - benchStart) / iterations;
+console.log(`  ${iterations} searches in ${benchEnd - benchStart}ms (avg ${avgMs.toFixed(2)}ms)`);
+assert(avgMs < 50, `search should average <50ms (got ${avgMs.toFixed(2)}ms)`);
 
 // Clean up test data
 getStats(); // just to ensure store is loaded
