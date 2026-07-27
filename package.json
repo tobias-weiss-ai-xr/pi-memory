@@ -1,0 +1,39 @@
+{
+  "name": "pi-memory",
+  "version": "1.0.0",
+  "description": "Experiential memory for pi — learns from past sessions, surfaces insights, persists coding patterns across sessions. Integrates with Graphiti for cross-agent recall.",
+  "keywords": [
+    "pi-package",
+    "memory",
+    "experiential",
+    "coding-agent",
+    "pi-extension"
+  ],
+  "type": "module",
+  "main": "extensions/index.ts",
+  "scripts": {
+    "lint": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tobias-weiss-ai-xr/pi-memory"
+  },
+  "author": "Tobias Weiss",
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  }
+}
