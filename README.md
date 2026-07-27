@@ -1,4 +1,6 @@
 # 🧠 Pi Memory
+> **⚠️ Migrated from Codeberg → GitHub**: This repository has moved permanently to [GitHub](https://github.com/tobias-weiss-ai-xr/pi-memory). The Codeberg mirror is deprecated.
+
 
 **Experiential memory for [pi](https://pi.dev).**
 
