@@ -211,7 +211,7 @@ export default function (pi: ExtensionAPI) {
         ? params.tags.split(",").map(t => t.trim()).filter(Boolean)
         : [];
 
-      const { entry, updated } = storeMemory({
+      const { entry, updated, similar } = storeMemory({
         category: cat,
         topic: params.topic,
         content: params.content,
@@ -227,7 +227,13 @@ export default function (pi: ExtensionAPI) {
       const tagTip = tags.length === 0 && getAllTags().length > 0
         ? `\nTip: Add tags to improve search. Existing: ${getAllTags().slice(0, 8).join(", ")}`
         : "";
-      return textResult(`${updated ? "Updated" : "Stored"} as [${entry.category}] with id ${entry.id} in project ${entry.project}.${tagTip}`);
+
+      // Show similar existing memories (potential duplicates)
+      const similarTip = similar && similar.length > 0
+        ? `\n\nRelated existing memories:\n${similar.map(m => `  [${m.importance}★] ${m.topic} (${m.timestamp.slice(0, 10)})`).join("\n")}`
+        : "";
+
+      return textResult(`${updated ? "Updated" : "Stored"} as [${entry.category}] with id ${entry.id} in project ${entry.project}.${tagTip}${similarTip}`);
     },
   });
 

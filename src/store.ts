@@ -149,8 +149,9 @@ export function relevanceScore(entry: MemoryEntry): number {
   const importanceWeight = 0.6;
   const recencyWeight = 0.4;
 
-  // Normalize importance to 0-1
-  const impScore = entry.importance / 5;
+  // Use decayed importance (old entries lose importance over time)
+  const decayedImp = applyImportanceDecay(entry);
+  const impScore = decayedImp / 5;
 
   // Recency: exponential decay over 180 days
   const ageMs = Date.now() - new Date(entry.timestamp).getTime();
@@ -175,12 +176,61 @@ function getSessionId(): string | undefined {
 export interface StoreResult {
   entry: MemoryEntry;
   updated: boolean;
+  /** Similar existing memories (to prevent accidental duplicates) */
+  similar?: MemoryEntry[];
+}
+
+/**
+ * Find memories with similar topic or content (for dedup hints).
+ * Returns up to `limit` entries with the highest text similarity.
+ * Excludes exact topic matches (those are handled by dedup logic).
+ */
+export function findSimilar(topic: string, content: string, limit = 3): MemoryEntry[] {
+  const store = load();
+  const topicLower = topic.toLowerCase();
+  const contentWords = content.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+
+  return store.entries
+    .map(e => {
+      const eTopic = e.topic.toLowerCase();
+      const eContent = e.content.toLowerCase();
+
+      // Exact topic matches are handled by dedup — skip them here
+      if (eTopic === topicLower) return { entry: e, score: -1 };
+
+      // Score: topic word overlap + content word overlap
+      let score = 0;
+
+      // Topic similarity: word overlap in topics
+      const topicWords = topicLower.split(/\s+/);
+      const eTopicWords = eTopic.split(/\s+/);
+      for (const w of topicWords) {
+        if (eTopicWords.includes(w)) score += 0.3;
+      }
+
+      // Content similarity: shared significant words
+      const eContentWords = new Set(eContent.split(/\s+/).filter(w => w.length > 3));
+      let matches = 0;
+      for (const w of contentWords) {
+        if (eContentWords.has(w)) matches++;
+      }
+      if (contentWords.length > 0) {
+        score += (matches / contentWords.length) * 0.7;
+      }
+
+      return { entry: e, score };
+    })
+    .filter(x => x.score > 0.15) // meaningful similarity threshold
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(x => x.entry);
 }
 
 /**
  * Store a new memory entry. Auto-populates sessionId if PI_SESSION_ID is set.
  * Deduplicates: if an entry with the same topic + project + category exists,
  * updates it instead of creating a duplicate.
+ * Returns similar existing entries so the caller can warn about potential dupes.
  */
 export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "project"> & { project?: string; cwd?: string }): StoreResult {
   const store = load();
@@ -223,7 +273,11 @@ export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "proje
   };
   store.entries.push(newEntry);
   markDirty(store);
-  return { entry: newEntry, updated: false };
+
+  // Find similar entries for dedup hints (skip if it was an exact duplicate)
+  const similar = findSimilar(entry.topic, entry.content || "", 3);
+
+  return { entry: newEntry, updated: false, similar: similar.length > 0 ? similar : undefined };
 }
 
 /**
@@ -405,6 +459,39 @@ export function formatMemory(m: MemoryEntry, score?: number): string {
   const stars = "★".repeat(m.importance) + "☆".repeat(5 - m.importance);
   const scoreStr = score !== undefined ? ` (${(score * 100).toFixed(0)}%)` : "";
   return `[${date}] [${m.category}] ${stars}${scoreStr} ${m.project}: ${m.topic}${tagStr}\n  ${m.content.slice(0, 300)}`;
+}
+
+/**
+ * Apply time-based importance decay. Reduces importance of very old entries
+ * so they don't permanently dominate search results.
+ * Decay schedule: importance drops by 1 after 180 days, by 2 after 365 days.
+ * Minimum importance after decay is 1.
+ */
+export function applyImportanceDecay(entry: MemoryEntry): number {
+  const ageMs = Date.now() - new Date(entry.timestamp).getTime();
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+
+  let decay = 0;
+  if (ageDays > 365) decay = 2;
+  else if (ageDays > 180) decay = 1;
+
+  return Math.max(1, entry.importance - decay);
+}
+
+/**
+ * Format search results with highlighted matching terms.
+ * Wraps matched words in **bold** markers.
+ */
+export function highlightMatches(text: string, query: string): string {
+  if (!query || !query.trim()) return text;
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return text;
+
+  // Build regex that matches any of the terms as whole words
+  const pattern = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join("|");
+  const regex = new RegExp(`(${pattern})`, "gi");
+
+  return text.replace(regex, "**$1**");
 }
 
 /**

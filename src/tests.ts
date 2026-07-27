@@ -31,6 +31,8 @@ import {
   importMemories,
   getTTLDays,
   getMaxContextMemories,
+  applyImportanceDecay,
+  highlightMatches,
 } from "./store.js";
 
 // Override the store dir by manipulating the module's internal state
@@ -111,6 +113,28 @@ deleteMemory(entry.id);
 // Test import of the exported data
 const imported = importMemories(exported);
 assert(imported >= 0, "import should return count");
+
+
+console.log("\n=== findSimilar ===");
+// Store some entries then find similar ones
+storeMemory({ category: "insight", topic: "Docker networking issue", content: "Docker containers cannot reach host services on VPN IPs because of network namespaces", tags: ["docker"], importance: 4 });
+const similar = storeMemory({ category: "insight", topic: "Prometheus scrape failing", content: "Prometheus on bridge network cannot scrape node_exporter on VPN IP without host networking", tags: ["docker", "prometheus"], importance: 3 });
+assert(similar.similar !== undefined, "should return similar entries when storing");
+assert(similar.similar!.length > 0, "should find at least 1 similar entry");
+
+console.log("\n=== applyImportanceDecay ===");
+const freshEntry = { id: "t1", timestamp: new Date().toISOString(), project: "test", category: "warning" as const, topic: "Fresh", content: "x", tags: [], importance: 5 };
+const oldEntry1 = { id: "t2", timestamp: new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString(), project: "test", category: "warning" as const, topic: "Oldish", content: "x", tags: [], importance: 5 };
+const oldEntry2 = { id: "t3", timestamp: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString(), project: "test", category: "warning" as const, topic: "Very old", content: "x", tags: [], importance: 5 };
+assert(applyImportanceDecay(freshEntry) === 5, "fresh entry should keep full importance");
+assert(applyImportanceDecay(oldEntry1) === 4, "200-day-old entry should decay by 1 → 4");
+assert(applyImportanceDecay(oldEntry2) === 3, "400-day-old entry should decay by 2 → 3");
+assert(applyImportanceDecay({ ...oldEntry2, importance: 1 }) === 1, "importance should floor at 1");
+
+console.log("\n=== highlightMatches ===");
+const highlighted = highlightMatches("Docker networking is tricky", "docker");
+assert(highlighted.includes("**Docker**"), "should bold matching terms");
+assert(!highlighted.includes("tricky**"), "should not bold non-matching terms");
 
 // Clean up test data
 getStats(); // just to ensure store is loaded
