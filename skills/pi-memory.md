@@ -1,76 +1,95 @@
 ---
-description: Experiential memory — learn from past sessions and persist patterns, decisions, and insights across sessions.
+description: "Experiential memory: learn from past sessions and persist patterns, decisions, and insights across sessions. Memories are auto-injected into context at session start."
 ---
 
-# Pi Memory
+# 🧠 Pi Memory
 
 Pi Memory is an experiential memory system that learns from past coding sessions
-and surfaces relevant prior knowledge. **Always use it at session start and end.**
+and surfaces relevant prior knowledge. **Relevant memories are automatically injected
+into the model's system prompt at session start** — but you can still search for more.
+
+> 💡 **Tip:** Your session already has relevant memories loaded. Scroll up or
+> check the system prompt to see them. Use the tools below for deeper search.
+
+---
 
 ## Tools
 
-### memory_search
-Search past learnings, decisions, patterns, and warnings.
+### `memory_search`
+Search past learnings. Results sorted by relevance (importance × recency).
 
 ```
 memory_search query="docker port mapping" limit=5
 memory_search query="grafana datasource" category=insight
-memory_search query="pi-memory" project=pi-memory
+memory_search query=""                        # All, sorted by relevance
+memory_search query="ansible" project=ansible  # Filter by project
 ```
 
-### memory_store
-Store an experiential learning, decision, pattern, warning, or todo.
+### `memory_store`
+Store a new learning. Auto-deduplicates: if same topic+project+category exists
+across sessions, it merges content, boosts importance, and combines tags.
+**Importance is auto-suggested by category** (warnings/decisions → 4★, insights/patterns → 3★, etc.).
 
 ```
-memory_store topic="UFW blocks Docker port 9090" category=warning content="Prometheus in Docker can't reach host services via VPN IP if UFW blocks the port. Use 127.0.0.1 instead." tags="docker,ufw,networking" importance=4
-memory_store topic="Use Store pattern for state" category=pattern content="Centralize mutable state in a Store module with load/save helpers. Avoid scattering file I/O across the codebase." tags="architecture,typescript"
+# Full example:
+memory_store topic="UFW blocks Docker port 9090" \
+  category=warning \
+  content="Prometheus in Docker can't reach host services via VPN IP if UFW blocks the port. Use 127.0.0.1 instead." \
+  tags="docker,ufw,networking" \
+  importance=4
+
+# Minimal (importance auto-assigned from category):
+memory_store topic="State management pattern" \
+  category=pattern \
+  content="Centralize mutable state in a Store module with load/save helpers."
 ```
 
-### memory_stats
-Check how many memories are stored and their distribution.
+### `memory_stats`
+Show memory statistics, category/project distribution, and this-session count.
 
 ```
 memory_stats
 ```
 
-### memory_update
-Update or correct an existing memory (find its ID via `memory_search` first).
+### `memory_update`
+Update an existing memory by ID (find it via `memory_search` first).
 
 ```
-memory_update id="mem_xxx_yyy" content="Corrected/supplemented content" importance=4
+memory_update id="mem_xxx_yyy" content="Updated content" importance=5
+memory_update id="mem_xxx_yyy" tags="new,tags,here"
 ```
 
-### memory_delete
+### `memory_delete`
 Remove a memory by ID (irreversible).
 
 ```
 memory_delete id="mem_xxx_yyy"
 ```
 
+---
+
 ## Categories
 
-| Category | When to Use | Example |
-|----------|-------------|---------|
-| `insight` | Discovered a non-obvious truth about a system | "Traefik needs network_mode:host for ACME" |
-| `pattern` | A reusable approach that worked well | "Store JSON state in ~/.config/app/" |
-| `decision` | An architectural choice with rationale | "Chose SQLite over JSON for queryability" |
-| `warning` | A pitfall to avoid in the future | "UFW blocks Docker → host via external IP" |
-| `todo` | Something to address in a future session | "Add proper error handling to the memory store" |
+| Category | Icon | When to Use | Auto-Importance | Example |
+|----------|------|-------------|-----------------|---------|
+| `warning` | ⚠️ | Pitfall to avoid | **4★** | "UFW blocks Docker → host via external IP" |
+| `decision` | 🏛️ | Architectural choice | **4★** | "Chose SQLite over JSON for queryability" |
+| `insight` | 💡 | Non-obvious truth | **3★** | "Traefik needs network_mode:host for ACME" |
+| `pattern` | 🔄 | Reusable approach | **3★** | "Store pattern for state management" |
+| `todo` | 📋 | Future task | **2★** | "Add error handling to memory store" |
 
-## Session Lifecycle (Mandatory)
+---
 
-### 1. Session Start — Retrieve Prior Context
+## Session Lifecycle
 
-**Always call `memory_search` at the beginning of every session** to load
-relevant prior knowledge. You are NOT automatically given this context —
-you must retrieve it explicitly.
+### 1. Session Start — Review Context (Optional)
+
+Relevant memories are **automatically loaded** into your system prompt.
+You don't need to search — they're already there. However, you can still:
 
 ```
-# General: get context for current project
-memory_search query="<current task topic>" project=<project>
-
-# Get high-importance warnings for the project
-memory_search query="" category=warning project=<project>
+# Get additional context on a specific topic
+memory_search query="<specific topic>" limit=5
 
 # Check overall memory stats
 memory_stats
@@ -78,58 +97,89 @@ memory_stats
 
 ### 2. During Session — Store Discoveries Immediately
 
-When you discover a non-obvious truth, fix a tricky bug, or make an
-architectural decision, **store it right away** — don't wait until the end.
+**When you discover something important, store it right away.**
 
 ```
 memory_store topic="<descriptive title>" category=insight \
   content="<what was learned, why it matters, how to reproduce>" \
-  tags="key1,key2,project-name" importance=4
+  tags="key1,key2,project-name"
 ```
+
+Good candidates for storing:
+- A non-obvious bug fix
+- An architectural decision with rationale
+- A CLI incantation or config trick
+- A security gotcha
+- A tool or workflow pattern
 
 ### 3. Session End — Persist Outcomes
 
-**Always call `memory_store` at the end of every session** with a structured
-summary covering: what was done, key decisions, what's left for next time.
+A session bookmark is stored automatically. For deeper persistence, store
+a structured summary of what was accomplished:
 
 ```
-memory_store topic="Session: <topic> - <date>" category=decision \
-  content="Completed: <key accomplishments>.\nDecisions: <architectural choices>.\nNext: <what to tackle next>.\nIssues: <known problems>." \
-  tags="session,<project>,<topic>" importance=3
+memory_store topic="Session summary: <topic>" category=decision \
+  content="Completed: <accomplishments>.\\n"
+  content+="Decisions: <key choices>.\\n"
+  content+="Next: <what to tackle next>.\\n"
+  content+="Issues: <known problems>." \
+  tags="session,<project>" \
+  importance=3
 ```
 
-## Project Patterns
+---
 
-When working with **Ansible infrastructure** (this repo), always store:
+## Project-Specific Guidance
 
-- Playbook or role changes with `project=ansible`
-- Host-specific configs with tags like `host=<hostname>`
-- Security fixes with tags `security,<cve-or-type>` and importance=4+
-- Docker/container issues with tags `docker,<service>`
-- Monitoring changes with tags `prometheus,grafana,alert`
+### Ansible Infrastructure (`ansible-private`)
+
+- Store playbook/role changes with `project=ansible`
+- Tag with `host=<hostname>` for host-specific configs
+- Security fixes: tags `security,<cve>`, importance 4+
+- Docker issues: tags `docker,<service>`
+- Monitoring changes: tags `prometheus,grafana,alert`
+
+### General
+
+- Use `project=<repo-name>` (auto-detected from git remote)
+- Tag with technology names: `docker, typescript, python, ansible`
+- Set importance=4+ for anything that could cause data loss or security issues
+- Set importance=2 for nice-to-haves and minor observations
+
+---
 
 ## Integration with Graphiti
 
-Pi Memory is for **experiential** memory (coding patterns, lessons learned,
-decisions). Graphiti is for **structured** memory (entities, relationships,
-cross-agent facts). Use both:
-
-- **Graphiti** for structured data about hosts, services, and their relationships
-- **Pi Memory** for experiential knowledge about how things work and gotchas
+| System | Purpose | When to Use |
+|--------|---------|-------------|
+| **Pi Memory** (`memory_search`) | Experiential knowledge | Coding patterns, gotchas, decisions, learnings |
+| **Graphiti** (`graphiti_search`) | Structured entity graph | Hosts, services, relationships, cross-agent facts |
 
 ```
-# Query Graphiti for structured context about a host/service:
-graphiti_search query="<host or service name>"
+# Experiential: "how" and "why"
+memory_search query="Traefik" category=warning
 
-# Store experiential learning:
-memory_store topic="..." category=insight ...
+# Structured: "what" and "where"
+graphiti_search query="traefik proxy config"
 ```
+
+---
+
+## Environment Variables
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `PI_MEMORY_TTL_DAYS` | `90` | Auto-prune old low-importance entries |
+| `PI_MEMORY_MAX_CONTEXT` | `8` | Max memories in auto-context prompt |
+
+---
 
 ## Best Practices
 
-1. **Mandatory**: Call `memory_search` at session start + `memory_store` at session end
-2. **Store immediately** after every significant discovery or decision
-3. Use specific, searchable topics (not generic)
-4. Set importance=4 or 5 for critical learnings (security, data loss risk)
-5. Tag generously: include project, technology, domain
-6. Use `memory_stats` at session start to see what's available
+1. ✅ **Auto-context is loaded** — but search for specifics if needed
+2. ✅ **Store immediately** after every significant discovery
+3. ✅ Use specific, searchable topics (not "Fixed bug")
+4. ✅ Set importance=4-5 for critical learnings
+5. ✅ Tag generously: include project + technology + domain
+6. ✅ Use `memory_stats` to check what's available
+7. ✅ Use `memory_update` to correct or supplement entries
