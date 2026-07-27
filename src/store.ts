@@ -115,11 +115,19 @@ function getSessionId(): string | undefined {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
+ * Result from storeMemory: the stored/updated entry and whether it was an update.
+ */
+export interface StoreResult {
+  entry: MemoryEntry;
+  updated: boolean;
+}
+
+/**
  * Store a new memory entry. Auto-populates sessionId if PI_SESSION_ID is set.
  * Deduplicates: if an entry with the same topic + project + category exists,
  * updates it instead of creating a duplicate.
  */
-export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "project"> & { project?: string; cwd?: string }): MemoryEntry {
+export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "project"> & { project?: string; cwd?: string }): StoreResult {
   const store = load();
   const sessionId = getSessionId();
 
@@ -147,7 +155,7 @@ export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "proje
       tags: [...new Set([...old.tags, ...(entry.tags || [])])],
     };
     save(store);
-    return store.entries[existing];
+    return { entry: store.entries[existing], updated: true };
   }
 
   const newEntry: MemoryEntry = {
@@ -160,7 +168,7 @@ export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "proje
   };
   store.entries.push(newEntry);
   save(store);
-  return newEntry;
+  return { entry: newEntry, updated: false };
 }
 
 /**
@@ -198,27 +206,73 @@ export function searchMemories(query: string, limit = 20): MemoryEntry[] {
 }
 
 /**
- * Get high-value context memories for a project: top 5 by relevance,
- * then warnings/decisions from other projects that have high importance.
+ * Get high-value context memories for a project: top project-specific memories
+ * plus cross-project warnings/decisions with high importance.
+ * Deduplicates by topic and ensures category diversity.
  */
 export function getContextMemories(project: string, limit = 8): MemoryEntry[] {
   const store = load();
+  const seenTopics = new Set<string>();
+
+  // Project memories: all high-importance (>=3) + recent medium-importance (>=2)
   const projectMemories = store.entries
-    .filter(e => e.project === project && e.importance >= 2)
-    .sort((a, b) => relevanceScore(b) - relevanceScore(a))
-    .slice(0, Math.ceil(limit * 0.7));
+    .filter(e =>
+      e.project === project &&
+      e.importance >= 2 &&
+      !seenTopics.has(e.topic)
+    )
+    .sort((a, b) => relevanceScore(b) - relevanceScore(a));
 
   // Add cross-project warnings and decisions with importance >= 4
   const crossProject = store.entries
     .filter(e =>
       e.project !== project &&
       e.importance >= 4 &&
-      (e.category === "warning" || e.category === "decision")
+      (e.category === "warning" || e.category === "decision") &&
+      !seenTopics.has(e.topic)
     )
-    .sort((a, b) => relevanceScore(b) - relevanceScore(a))
-    .slice(0, Math.floor(limit * 0.3));
+    .sort((a, b) => relevanceScore(b) - relevanceScore(a));
 
-  return [...projectMemories, ...crossProject];
+  // Interleave: take top project memories, then fill gaps with cross-project
+  const result: MemoryEntry[] = [];
+  const projectLimit = Math.ceil(limit * 0.65);
+  const crossLimit = limit - projectLimit;
+
+  for (const m of projectMemories) {
+    if (result.length >= projectLimit) break;
+    seenTopics.add(m.topic);
+    result.push(m);
+  }
+
+  // Ensure category diversity: prefer underrepresented categories
+  const categoryCount = new Map<string, number>();
+  for (const m of result) {
+    categoryCount.set(m.category, (categoryCount.get(m.category) || 0) + 1);
+  }
+
+  for (const m of crossProject) {
+    if (result.length >= limit) break;
+    if (seenTopics.has(m.topic)) continue;
+    const catCount = categoryCount.get(m.category) || 0;
+    // Prefer warnings and decisions that are underrepresented in project memories
+    if (catCount >= 2) continue; // already have 2 of this category
+    seenTopics.add(m.topic);
+    categoryCount.set(m.category, catCount + 1);
+    result.push(m);
+  }
+
+  // If we still have slots, fill with remaining high-scoring memories
+  if (result.length < limit) {
+    const allCandidates = [...projectMemories, ...crossProject];
+    for (const m of allCandidates) {
+      if (result.length >= limit) break;
+      if (seenTopics.has(m.topic)) continue;
+      seenTopics.add(m.topic);
+      result.push(m);
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -253,6 +307,49 @@ export function getMemoriesByCategory(category: MemoryCategory, limit = 20): Mem
     .filter(e => e.category === category)
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     .slice(0, limit);
+}
+
+/**
+ * Get summary stats about stored memories.
+ */
+/**
+ * Get all unique tags across all entries (for autocomplete).
+ */
+export function getAllTags(): string[] {
+  const store = load();
+  const tags = new Set<string>();
+  for (const e of store.entries) {
+    for (const t of e.tags) {
+      tags.add(t);
+    }
+  }
+  return [...tags].sort();
+}
+
+/**
+ * Get suggested importance for a category.
+ */
+export function suggestedImportance(category: MemoryCategory): number {
+  switch (category) {
+    case "warning": return 4;
+    case "decision": return 4;
+    case "insight": return 3;
+    case "pattern": return 3;
+    case "todo": return 2;
+    case "session": return 1;
+    default: return 3;
+  }
+}
+
+/**
+ * Format a memory entry for display (adds relevance score when available).
+ */
+export function formatMemory(m: MemoryEntry, score?: number): string {
+  const date = m.timestamp.slice(0, 10);
+  const tagStr = m.tags.length ? ` [${m.tags.join(", ")}]` : "";
+  const stars = "★".repeat(m.importance) + "☆".repeat(5 - m.importance);
+  const scoreStr = score !== undefined ? ` (${(score * 100).toFixed(0)}%)` : "";
+  return `[${date}] [${m.category}] ${stars}${scoreStr} ${m.project}: ${m.topic}${tagStr}\n  ${m.content.slice(0, 300)}`;
 }
 
 /**
@@ -352,12 +449,38 @@ export function importMemories(json: string, merge = true): number {
 }
 
 /**
- * Prune old low-importance memories (auto-maintenance).
- * Removes entries with importance <= 2 that are older than 90 days.
+ * Get TTL (in days) from environment variable PI_MEMORY_TTL_DAYS, default 90.
  */
-export function pruneOldMemories(maxAgeDays = 90, minImportance = 3): number {
+export function getTTLDays(): number {
+  const env = process.env.PI_MEMORY_TTL_DAYS;
+  if (env) {
+    const n = parseInt(env, 10);
+    if (!isNaN(n) && n >= 7) return n;
+  }
+  return 90;
+}
+
+/**
+ * Get max context memories from env var PI_MEMORY_MAX_CONTEXT, default 8.
+ */
+export function getMaxContextMemories(): number {
+  const env = process.env.PI_MEMORY_MAX_CONTEXT;
+  if (env) {
+    const n = parseInt(env, 10);
+    if (!isNaN(n) && n >= 1 && n <= 20) return n;
+  }
+  return 8;
+}
+
+/**
+ * Prune old low-importance memories (auto-maintenance).
+ * Removes entries with importance <= 2 that are older than TTL.
+ * TTL defaults to 90 days, configurable via PI_MEMORY_TTL_DAYS env var.
+ */
+export function pruneOldMemories(maxAgeDays?: number, minImportance = 3): number {
+  const days = maxAgeDays ?? getTTLDays();
   const store = load();
-  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   const before = store.entries.length;
   store.entries = store.entries.filter(e =>
     e.importance >= minImportance ||
@@ -369,42 +492,81 @@ export function pruneOldMemories(maxAgeDays = 90, minImportance = 3): number {
 
 /**
  * Write context memories to a prompt file that pi's resource system can load.
- * Returns the path to the generated prompt file.
+ * Returns the path to the generated prompt file, or null if no memories.
+ *
+ * The prompt is formatted for easy parsing by the model: grouped by category
+ * with clear headers, importance badges, and relevance scores.
  */
 export function writeContextPrompt(project: string): string | null {
-  const memories = getContextMemories(project, 8);
+  const limit = getMaxContextMemories();
+  const memories = getContextMemories(project, limit);
   if (memories.length === 0) return null;
 
   ensureDir(PROMPT_DIR);
 
   const lines: string[] = [
     "---",
-    "description: Relevant memories from past sessions, auto-loaded by pi-memory.",
+    "description: Past session memories relevant to this project, auto-loaded by pi-memory.",
     "---",
     "",
-    `# 🧠 Prior Knowledge from ${project}`,
+    `# 🧠 Prior Knowledge: ${project}`,
     "",
-    "The following memories from past sessions are relevant to this project.",
-    "Review them before starting work — they may contain critical warnings or patterns.",
+    "These memories from past sessions are relevant to the current project.",
+    "They are sorted by relevance (importance × recency).",
+    "Pay special attention to ⚠️ Warnings and ⭐ high-importance entries.",
     "",
   ];
 
+  // Group by category for better readability
+  const grouped: Record<string, MemoryEntry[]> = {};
   for (const m of memories) {
-    const star = m.importance >= 4 ? " ⭐" : "";
-    const tagStr = m.tags.length ? ` [${m.tags.join(", ")}]` : "";
-    lines.push(
-      `## [${m.category}] ${m.topic}${star}`,
-      `**Project:** ${m.project} | **Date:** ${m.timestamp.slice(0, 10)} | **Importance:** ${m.importance}/5${tagStr}`,
-      ``,
-      m.content,
-      ``,
-      `---`,
-      ``,
-    );
+    const cat = m.category;
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push(m);
+  }
+
+  // Category display order: warnings first, then decisions, insights, patterns, rest
+  const catOrder = ["warning", "decision", "insight", "pattern", "todo", "session"];
+  const catIcons: Record<string, string> = {
+    warning: "⚠️",
+    decision: "🏛️",
+    insight: "💡",
+    pattern: "🔄",
+    todo: "📋",
+    session: "📝",
+  };
+  const catLabels: Record<string, string> = {
+    warning: "Warnings",
+    decision: "Decisions",
+    insight: "Insights",
+    pattern: "Patterns",
+    todo: "Todos",
+    session: "Sessions",
+  };
+
+  for (const cat of catOrder) {
+    const entries = grouped[cat];
+    if (!entries) continue;
+
+    lines.push(`### ${catIcons[cat] || "•"} ${catLabels[cat] || cat}`);
+    lines.push("");
+
+    for (const m of entries) {
+      const score = relevanceScore(m);
+      const stars = "★".repeat(m.importance) + "☆".repeat(5 - m.importance);
+      const tagStr = m.tags.length ? ` \`${m.tags.join("` `")}\`` : "";
+      const date = m.timestamp.slice(0, 10);
+
+      lines.push(`**${m.topic}** — ${stars} (${(score * 100).toFixed(0)}%) — ${date}`);
+      lines.push(`> ${m.content.replace(/\n/g, "\n> ")}`);
+      lines.push("");
+    }
+    lines.push("---");
+    lines.push("");
   }
 
   lines.push(
-    "_End of pi-memory context. Use `memory_search` to find more specific memories._",
+    "> _End of pi-memory context. Use \`memory_search\` to find more specific or older memories._",
   );
 
   const filePath = path.join(PROMPT_DIR, `${project}.md`);

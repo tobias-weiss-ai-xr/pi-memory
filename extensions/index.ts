@@ -30,6 +30,10 @@ import {
   importMemories,
   pruneOldMemories,
   writeContextPrompt,
+  formatMemory,
+  getAllTags,
+  suggestedImportance,
+  getTTLDays,
   type MemoryCategory,
 } from "../src/store.js";
 
@@ -112,10 +116,11 @@ export default function (pi: ExtensionAPI) {
       cwd,
     });
 
-    // Prune old low-importance entries (auto-maintenance)
-    const pruned = pruneOldMemories(90, 3);
+    // Prune old low-importance entries (auto-maintenance, TTL from PI_MEMORY_TTL_DAYS)
+    const ttlDays = getTTLDays();
+    const pruned = pruneOldMemories(ttlDays, 3);
     if (pruned > 0 && ctx.hasUI) {
-      ctx.ui.notify(`\u{1F9E0} Pruned ${pruned} old low-importance memories`, "info");
+      ctx.ui.notify(`\u{1F9E0} Pruned ${pruned} old low-importance memories (TTL: ${ttlDays}d)`, "info");
     }
   });
 
@@ -152,12 +157,7 @@ export default function (pi: ExtensionAPI) {
         return textResult("No matching memories found.");
       }
 
-      const lines = results.map(m => {
-        const date = m.timestamp.slice(0, 10);
-        const tagStr = m.tags.length ? ` [${m.tags.join(", ")}]` : "";
-        const star = m.importance >= 4 ? " ⭐" : "";
-        return `[${date}] [${m.category}]${star} ${m.project}: ${m.topic}${tagStr}\n  ${m.content.slice(0, 300)}`;
-      });
+      const lines = results.map(m => formatMemory(m, undefined));
 
       return textResult(`Found ${results.length} memory entr${results.length === 1 ? "y" : "ies"} (sorted by relevance):\n\n${lines.join("\n\n")}`);
     },
@@ -187,24 +187,38 @@ export default function (pi: ExtensionAPI) {
       const validCategories: MemoryCategory[] = ["insight", "pattern", "decision", "warning", "todo", "session"];
       const cat = params.category as MemoryCategory;
       if (!validCategories.includes(cat)) {
-        return textResult(`Invalid category. Choose: ${validCategories.join(", ")}`);
+        const hint = getAllTags().filter(t => t.includes(params.category.toLowerCase())).slice(0, 5);
+        const tagHint = hint.length ? `\nDid you mean tags: ${hint.join(", ")}?` : "";
+        return textResult(`Invalid category. Choose: ${validCategories.join(", ")}.${tagHint}`);
       }
 
-      const entry = storeMemory({
+      // Auto-suggest importance if not provided
+      const importance = params.importance !== undefined
+        ? Math.min(5, Math.max(1, params.importance))
+        : suggestedImportance(cat);
+
+      // Suggest existing tags if none provided
+      const tags = params.tags
+        ? params.tags.split(",").map(t => t.trim()).filter(Boolean)
+        : [];
+
+      const { entry, updated } = storeMemory({
         category: cat,
         topic: params.topic,
         content: params.content,
-        tags: params.tags ? params.tags.split(",").map(t => t.trim()).filter(Boolean) : [],
-        importance: Math.min(5, Math.max(1, params.importance || 3)),
+        tags,
+        importance,
         cwd: ctx.cwd,
       });
 
       if (ctx.hasUI) {
-        ctx.ui.notify(`\u{1F9E0} Stored: ${params.topic}`, "info");
+        ctx.ui.notify(`\u{1F9E0} ${updated ? "Updated" : "Stored"}: ${params.topic}`, "info");
       }
 
-      return textResult(`Stored as [${entry.category}] with id ${entry.id} in project ${entry.project}.`
-        + (entry.timestamp !== entry.timestamp ? " (updated existing entry)" : ""));
+      const tagTip = tags.length === 0 && getAllTags().length > 0
+        ? `\nTip: Add tags to improve search. Existing: ${getAllTags().slice(0, 8).join(", ")}`
+        : "";
+      return textResult(`${updated ? "Updated" : "Stored"} as [${entry.category}] with id ${entry.id} in project ${entry.project}.${tagTip}`);
     },
   });
 
