@@ -831,6 +831,7 @@ export function getMaxContextMemories(): number {
 /**
  * Prune old low-importance memories (auto-maintenance).
  * Removes entries with importance <= 2 that are older than TTL.
+ * Auto-backs up before pruning so nothing is permanently lost.
  * TTL defaults to 90 days, configurable via PI_MEMORY_TTL_DAYS env var.
  */
 export function pruneOldMemories(maxAgeDays?: number, minImportance = 3): number {
@@ -838,12 +839,38 @@ export function pruneOldMemories(maxAgeDays?: number, minImportance = 3): number
   const store = load();
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   const before = store.entries.length;
+  const toPrune = store.entries.filter(e =>
+    e.importance < minImportance &&
+    new Date(e.timestamp).getTime() <= cutoff
+  );
+
+  if (toPrune.length === 0) return 0;
+
+  // Auto-backup before destructive operation
+  const backupDir = path.join(BASE_DIR, "backups");
+  ensureDir(backupDir);
+  const backupPath = path.join(backupDir, `pre-prune-${Date.now()}.json`);
+  fs.writeFileSync(backupPath, JSON.stringify({ entries: toPrune }, null, 2), "utf-8");
+
   store.entries = store.entries.filter(e =>
     e.importance >= minImportance ||
     new Date(e.timestamp).getTime() > cutoff
   );
   markDirty(store);
   return before - store.entries.length;
+}
+
+/**
+ * Get a backup that was auto-created before the last prune.
+ */
+export function getLastPruneBackup(): string | null {
+  const backupDir = path.join(BASE_DIR, "backups");
+  if (!fs.existsSync(backupDir)) return null;
+  const files = fs.readdirSync(backupDir)
+    .filter(f => f.startsWith("pre-prune-"))
+    .sort()
+    .reverse();
+  return files.length > 0 ? path.join(backupDir, files[0]) : null;
 }
 
 /**
@@ -860,6 +887,7 @@ export function writeContextPrompt(project: string): string | null {
 
   ensureDir(PROMPT_DIR);
 
+  const stats = getStats();
   const lines: string[] = [
     "---",
     "description: Past session memories relevant to this project, auto-loaded by pi-memory.",
@@ -867,9 +895,12 @@ export function writeContextPrompt(project: string): string | null {
     "",
     `# 🧠 Prior Knowledge: ${project}`,
     "",
-    "These memories from past sessions are relevant to the current project.",
+    `Memory stats: ${stats.total} total · ${stats.byProject[project] || 0} for this project`,
+    "These memories are relevant to the current session.",
     "They are sorted by relevance (importance × recency).",
-    "Pay special attention to ⚠️ Warnings and ⭐ high-importance entries.",
+    "⚠️ Warnings and ⭐ high-importance entries appear first.",
+    "",
+    `_Use \`memory_search\` for more specific queries across all ${Object.keys(stats.byProject).length} projects._`,
     "",
   ];
 

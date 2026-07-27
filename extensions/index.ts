@@ -345,6 +345,85 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ── Register: memory_export tool ──────────────────────────────────────────
+
+  pi.registerTool({
+    name: "memory_export",
+    label: "Memory Export",
+    description: "Export all memories as JSON. Returns a file path to the exported backup.",
+    promptSnippet: "memory_export: Backup all memories to a JSON file",
+    parameters: Type.Object({}),
+    async execute(
+      _id: string,
+      _params: object,
+      _sig: AbortSignal | undefined,
+      _up: AgentToolUpdateCallback<any> | undefined,
+      _ctx: ExtensionContext,
+    ): Promise<AgentToolResult<any>> {
+      const json = exportMemories();
+      const outPath = path.join(getStorePath(), "..", `pi-memory-export-${Date.now()}.json`);
+      fs.writeFileSync(outPath, json, "utf-8");
+      const stats = getStats();
+      return textResult(`Exported ${stats.total} entries to ${outPath}`);
+    },
+  });
+
+  // ── Register: memory_import tool ──────────────────────────────────────────
+
+  pi.registerTool({
+    name: "memory_import",
+    label: "Memory Import",
+    description: "Import memories from a JSON backup file. Merges with existing memories (no duplicates by ID).",
+    promptSnippet: "memory_import: Restore memories from a JSON backup file",
+    parameters: Type.Object({
+      path: Type.String({ description: "Path to the JSON export file to import" }),
+    }),
+    async execute(
+      _id: string,
+      params: { path: string },
+      _sig: AbortSignal | undefined,
+      _up: AgentToolUpdateCallback<any> | undefined,
+      _ctx: ExtensionContext,
+    ): Promise<AgentToolResult<any>> {
+      try {
+        const content = fs.readFileSync(params.path, "utf-8");
+        const imported = importMemories(content, true);
+        const stats = getStats();
+        return textResult(`Imported ${imported} new entries from ${params.path}. Total: ${stats.total}`);
+      } catch (err: any) {
+        return textResult(`Import failed: ${err.message}`);
+      }
+    },
+  });
+
+  // ── Register: memory_find tool ────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "memory_find",
+    label: "Memory Find",
+    description: "Look up a memory entry by its ID. Use after memory_search to get full details of a specific result.",
+    promptSnippet: "memory_find: Get full details of a memory entry by ID",
+    parameters: Type.Object({
+      id: Type.String({ description: "ID of the memory to retrieve (from memory_search results)" }),
+    }),
+    async execute(
+      _id: string,
+      params: { id: string },
+      _sig: AbortSignal | undefined,
+      _up: AgentToolUpdateCallback<any> | undefined,
+      _ctx: ExtensionContext,
+    ): Promise<AgentToolResult<any>> {
+      // Search all entries for the ID
+      const all = searchMemories("", 99999);
+      const found = all.find(e => e.id === params.id);
+      if (!found) {
+        return textResult(`Memory ${params.id} not found.`);
+      }
+      const formatted = formatMemory(found, relevanceScore(found));
+      return textResult(`Found memory ${params.id}:\n\n${formatted}`);
+    },
+  });
+
   // ── Register: /memory command ──────────────────────────────────────────────
 
   pi.registerCommand("memory", {
