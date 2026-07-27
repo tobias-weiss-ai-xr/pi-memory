@@ -31,7 +31,7 @@ import {
   importMemories,
   getTTLDays,
   getMaxContextMemories,
-} from "./store.ts";
+} from "./store.js";
 
 // Override the store dir by manipulating the module's internal state
 // Since store.ts uses os.homedir() + ".pi/agent/memory", we can't easily override.
@@ -101,7 +101,7 @@ if (origCtx) process.env.PI_MEMORY_MAX_CONTEXT = origCtx;
 
 console.log("\n=== Export/Import ===");
 // Test that export produces valid JSON
-const { entry } = storeMemory({ category: "insight", topic: "Export test", content: "test", importance: 3 });
+const { entry } = storeMemory({ category: "insight", topic: "Export test", content: "test", tags: ["test"], importance: 3 });
 const exported = exportMemories();
 const parsed = JSON.parse(exported);
 assert(Array.isArray(parsed.entries), "export should produce entries array");

@@ -35,6 +35,7 @@ import {
   suggestedImportance,
   getTTLDays,
   relevanceScore,
+  flush,
   type MemoryCategory,
 } from "../src/store.js";
 
@@ -123,6 +124,9 @@ export default function (pi: ExtensionAPI) {
     if (pruned > 0 && ctx.hasUI) {
       ctx.ui.notify(`\u{1F9E0} Pruned ${pruned} old low-importance memories (TTL: ${ttlDays}d)`, "info");
     }
+
+    // Flush pending writes to disk before session exits
+    flush();
   });
 
   // ── Register: memory_search tool ───────────────────────────────────────────

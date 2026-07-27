@@ -49,17 +49,71 @@ function ensureDir(dir: string = BASE_DIR): void {
   }
 }
 
+// ─── In-memory cache + deferred writes ───────────────────────────────────────
+
+let cachedStore: MemoryStore | null = null;
+let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+let isDirty = false;
+
+/**
+ * Load the store from disk (once, then cached in memory).
+ * Subsequent calls return the cached version instantly.
+ */
 function load(): MemoryStore {
+  if (cachedStore) return cachedStore;
   ensureDir();
   try {
     const raw = fs.readFileSync(STORE_FILE, "utf-8");
-    return JSON.parse(raw) as MemoryStore;
+    cachedStore = JSON.parse(raw) as MemoryStore;
+    return cachedStore;
   } catch {
-    return { entries: [] };
+    cachedStore = { entries: [] };
+    return cachedStore;
   }
 }
 
-function save(store: MemoryStore): void {
+/**
+ * Mark the in-memory store as dirty and schedule a deferred write.
+ * Multiple writes within the same tick are batched into one disk write.
+ */
+function markDirty(store: MemoryStore): void {
+  cachedStore = store;
+  isDirty = true;
+  if (saveTimeout === null) {
+    // Use queueMicrotask to batch writes within the same event loop tick
+    saveTimeout = setTimeout(() => {
+      flush();
+    }, 100); // 100ms debounce — fast stores batch together
+  }
+}
+
+/**
+ * Force-flush pending writes to disk immediately.
+ */
+export function flush(): void {
+  if (saveTimeout !== null) {
+    clearTimeout(saveTimeout);
+    saveTimeout = null;
+  }
+  if (isDirty && cachedStore) {
+    ensureDir();
+    fs.writeFileSync(STORE_FILE, JSON.stringify(cachedStore, null, 2), "utf-8");
+    isDirty = false;
+  }
+}
+
+/**
+ * Invalidate the in-memory cache so the next load() re-reads from disk.
+ */
+export function invalidateCache(): void {
+  cachedStore = null;
+  isDirty = false;
+}
+
+/**
+ * Save the store to disk immediately (synchronous, no cache).
+ */
+function saveSync(store: MemoryStore): void {
   ensureDir();
   fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), "utf-8");
 }
@@ -155,7 +209,7 @@ export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "proje
       importance: Math.max(old.importance, entry.importance || 3),
       tags: [...new Set([...old.tags, ...(entry.tags || [])])],
     };
-    save(store);
+    markDirty(store);
     return { entry: store.entries[existing], updated: true };
   }
 
@@ -168,7 +222,7 @@ export function storeMemory(entry: Omit<MemoryEntry, "id" | "timestamp" | "proje
     tags: entry.tags || [],
   };
   store.entries.push(newEntry);
-  save(store);
+  markDirty(store);
   return { entry: newEntry, updated: false };
 }
 
@@ -391,7 +445,7 @@ export function deleteMemory(id: string): boolean {
   const idx = store.entries.findIndex(e => e.id === id);
   if (idx === -1) return false;
   store.entries.splice(idx, 1);
-  save(store);
+  markDirty(store);
   return true;
 }
 
@@ -408,7 +462,7 @@ export function updateMemory(id: string, updates: Partial<Omit<MemoryEntry, "id"
     timestamp: new Date().toISOString(),
     tags: updates.tags || store.entries[idx].tags,
   };
-  save(store);
+  markDirty(store);
   return store.entries[idx];
 }
 
@@ -445,7 +499,7 @@ export function importMemories(json: string, merge = true): number {
     store.entries = imported.entries;
   }
 
-  save(store);
+  markDirty(store);
   return store.entries.length - existing;
 }
 
@@ -487,7 +541,7 @@ export function pruneOldMemories(maxAgeDays?: number, minImportance = 3): number
     e.importance >= minImportance ||
     new Date(e.timestamp).getTime() > cutoff
   );
-  save(store);
+  markDirty(store);
   return before - store.entries.length;
 }
 
