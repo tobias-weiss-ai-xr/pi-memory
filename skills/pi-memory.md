@@ -33,6 +33,20 @@ Check how many memories are stored and their distribution.
 memory_stats
 ```
 
+### memory_update
+Update or correct an existing memory (find its ID via `memory_search` first).
+
+```
+memory_update id="mem_xxx_yyy" content="Corrected/supplemented content" importance=4
+```
+
+### memory_delete
+Remove a memory by ID (irreversible).
+
+```
+memory_delete id="mem_xxx_yyy"
+```
+
 ## Categories
 
 | Category | When to Use | Example |
