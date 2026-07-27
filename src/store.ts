@@ -38,7 +38,8 @@ export interface MemoryStore {
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
-const BASE_DIR = path.join(os.homedir(), ".pi", "agent", "memory");
+// Allow override via PI_MEMORY_STORE_DIR for testing
+const BASE_DIR = process.env.PI_MEMORY_STORE_DIR || path.join(os.homedir(), ".pi", "agent", "memory");
 const STORE_FILE = path.join(BASE_DIR, "experiences.json");
 const PROMPT_DIR = path.join(BASE_DIR, "prompts");
 
@@ -90,7 +91,7 @@ function detectProject(cwd?: string): string {
  * Score range: 0-1 where 1 = most relevant.
  * importance contributes 60%, recency contributes 40%.
  */
-function relevanceScore(entry: MemoryEntry): number {
+export function relevanceScore(entry: MemoryEntry): number {
   const importanceWeight = 0.6;
   const recencyWeight = 0.4;
 

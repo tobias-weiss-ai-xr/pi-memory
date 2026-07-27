@@ -34,6 +34,7 @@ import {
   getAllTags,
   suggestedImportance,
   getTTLDays,
+  relevanceScore,
   type MemoryCategory,
 } from "../src/store.js";
 
@@ -157,7 +158,11 @@ export default function (pi: ExtensionAPI) {
         return textResult("No matching memories found.");
       }
 
-      const lines = results.map(m => formatMemory(m, undefined));
+      // Compute relevance scores for display
+      const lines = results.map(m => {
+        const score = relevanceScore(m);
+        return formatMemory(m, score);
+      });
 
       return textResult(`Found ${results.length} memory entr${results.length === 1 ? "y" : "ies"} (sorted by relevance):\n\n${lines.join("\n\n")}`);
     },
