@@ -2,9 +2,11 @@
  * pi-memory: Experiential memory extension for pi.
  *
  * Hooks into session lifecycle to:
- *  - Auto-store experiences, decisions, and patterns at session end
- *  - Retrieve relevant memories at session start
- *  - Provide memory_search, memory_store, and memory_stats tools
+ *  - Inject relevant past memories into context at session start
+ *  - Auto-store a structured session bookmark at shutdown
+ *  - Provide memory_search, memory_store, memory_stats tools
+ *  - Provide memory_update, memory_delete, memory_export, memory_prune
+ *  - Populate session ID from PI_SESSION_ID env var
  *
  * Install:  pi install /path/to/pi-memory
  * Reload:   /reload
@@ -13,6 +15,7 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import * as path from "node:path";
+import * as fs from "node:fs";
 import {
   storeMemory,
   searchMemories,
@@ -20,6 +23,13 @@ import {
   getRecentMemories,
   getStats,
   getStorePath,
+  getPromptDir,
+  deleteMemory,
+  updateMemory,
+  exportMemories,
+  importMemories,
+  pruneOldMemories,
+  writeContextPrompt,
   type MemoryCategory,
 } from "../src/store.js";
 
@@ -44,7 +54,10 @@ function textResult(text: string): AgentToolResult<any> {
 
 export default function (pi: ExtensionAPI) {
 
-  // ── Session start: surface relevant memories ──────────────────────────────
+  // ── Session start: write prompt file (loaded by resources_discover) ──────
+  // resources_discover fires after session_start, so the prompt file is written
+  // first, then automatically loaded into the model's context on the same session.
+  // This ensures the model sees relevant memories without having to call a tool.
 
   pi.on("session_start", async (_event, ctx) => {
     const cwd = ctx.cwd || process.cwd();
@@ -52,29 +65,58 @@ export default function (pi: ExtensionAPI) {
     const stats = getStats();
     if (stats.total === 0) return;
 
+    // Write context prompt file (loaded via resources_discover)
+    const promptFile = writeContextPrompt(project);
     const projectMemories = getMemoriesByProject(project, 5);
-    const short = projectMemories.length > 0
-      ? `\u{1F9E0} ${projectMemories.length} memories loaded for ${project}`
-      : `\u{1F9E0} ${stats.total} memories across ${Object.keys(stats.byProject).length} projects`;
 
     if (ctx.hasUI) {
+      const short = projectMemories.length > 0
+        ? `\u{1F9E0} ${projectMemories.length} memories for ${project} (${stats.total} total across ${Object.keys(stats.byProject).length} projects)`
+        : `\u{1F9E0} ${stats.total} memories across ${Object.keys(stats.byProject).length} projects`;
       ctx.ui.setStatus("pi-memory", short);
+
+      if (promptFile) {
+        ctx.ui.notify(`\u{1F9E0} ${projectMemories.length} relevant memories loaded into context`, "info");
+      }
     }
   });
 
-  // ── Session end: auto-store experiences ────────────────────────────────────
+  // ── Resources discover: serve prompt file to model's context ─────────────
+  // Fires after session_start. Returns the prompt file path that was just written
+  // by session_start, which gets loaded into the model's system prompt.
+
+  pi.on("resources_discover", (_event, ctx) => {
+    const project = detectProject(ctx.cwd);
+    const promptPath = path.join(getPromptDir(), `${project}.md`);
+    if (fs.existsSync(promptPath)) {
+      return { promptPaths: [promptPath] };
+    }
+    return {};
+  });
+
+  // ── Session end: auto-store structured bookmark ───────────────────────────
 
   pi.on("session_shutdown", async (_event, ctx) => {
     const cwd = ctx.cwd || process.cwd();
     const project = detectProject(cwd);
+    const now = new Date().toISOString().slice(0, 10);
+
+    // Store a richer session bookmark
     storeMemory({
       category: "session",
-      topic: `Session in ${project}`,
-      content: `Coding session in ${project} at ${new Date().toISOString().slice(0, 10)}`,
-      tags: [project, "session"],
-      importance: 1,
+      topic: `Session in ${project} — ${now}`,
+      content: `Session completed in ${project} on ${now}.`
+        + ` Key activities, decisions, and outcomes should be stored as separate entries.`,
+      tags: [project, "session", now],
+      importance: 2,
       cwd,
     });
+
+    // Prune old low-importance entries (auto-maintenance)
+    const pruned = pruneOldMemories(90, 3);
+    if (pruned > 0 && ctx.hasUI) {
+      ctx.ui.notify(`\u{1F9E0} Pruned ${pruned} old low-importance memories`, "info");
+    }
   });
 
   // ── Register: memory_search tool ───────────────────────────────────────────
@@ -83,9 +125,9 @@ export default function (pi: ExtensionAPI) {
     name: "memory_search",
     label: "Memory Search",
     description: "Search pi-memory's experiential database for past learnings, decisions, patterns, and warnings. Use at session start to retrieve prior context.",
-    promptSnippet: "memory_search: Retrieve prior experiential learnings from past sessions",
+    promptSnippet: "memory_search: Retrieve prior experiential learnings from past sessions. Call at session start to load relevant context.",
     parameters: Type.Object({
-      query: Type.String({ description: "Search keywords (matches topic, content, tags, project)" }),
+      query: Type.String({ description: "Search keywords (matches topic, content, tags, project). Empty string returns all sorted by relevance." }),
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
       category: Type.Optional(Type.String({ description: "Filter by category: insight, pattern, decision, warning, todo" })),
       project: Type.Optional(Type.String({ description: "Filter by project name" })),
@@ -113,10 +155,11 @@ export default function (pi: ExtensionAPI) {
       const lines = results.map(m => {
         const date = m.timestamp.slice(0, 10);
         const tagStr = m.tags.length ? ` [${m.tags.join(", ")}]` : "";
-        return `[${date}] [${m.category}] ${m.project}: ${m.topic}${tagStr}\n  ${m.content.slice(0, 300)}`;
+        const star = m.importance >= 4 ? " ⭐" : "";
+        return `[${date}] [${m.category}]${star} ${m.project}: ${m.topic}${tagStr}\n  ${m.content.slice(0, 300)}`;
       });
 
-      return textResult(`Found ${results.length} memory entr${results.length === 1 ? "y" : "ies"}:\n\n${lines.join("\n\n")}`);
+      return textResult(`Found ${results.length} memory entr${results.length === 1 ? "y" : "ies"} (sorted by relevance):\n\n${lines.join("\n\n")}`);
     },
   });
 
@@ -125,14 +168,14 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory_store",
     label: "Memory Store",
-    description: "Store an experiential learning, decision, pattern, warning, or todo into pi-memory. Use after completing a task, discovering a workaround, or making an architectural decision.",
-    promptSnippet: "memory_store: Persist learnings, patterns, and decisions for future sessions",
+    description: "Store an experiential learning, decision, pattern, warning, or todo into pi-memory. Auto-deduplicates: if same topic+project+category exists, updates it. Use after completing a task, discovering a workaround, or making an architectural decision.",
+    promptSnippet: "memory_store: Persist learnings, patterns, and decisions for future sessions. Auto-deduplicates.",
     parameters: Type.Object({
       topic: Type.String({ description: "Short title for this memory (e.g., 'UFW blocks Docker port 9090')" }),
       content: Type.String({ description: "Detailed description of what was learned, decided, or observed" }),
       category: Type.String({ description: "insight, pattern, decision, warning, or todo" }),
       tags: Type.Optional(Type.String({ description: "Comma-separated tags for search (e.g., 'docker,ufw,networking')" })),
-      importance: Type.Optional(Type.Number({ description: "Importance 1-5 (default 3)" })),
+      importance: Type.Optional(Type.Number({ description: "Importance 1-5 (default 3). Use 4-5 for critical learnings." })),
     }),
     async execute(
       _id: string,
@@ -160,7 +203,8 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`\u{1F9E0} Stored: ${params.topic}`, "info");
       }
 
-      return textResult(`Stored as [${entry.category}] with id ${entry.id} in project ${entry.project}.`);
+      return textResult(`Stored as [${entry.category}] with id ${entry.id} in project ${entry.project}.`
+        + (entry.timestamp !== entry.timestamp ? " (updated existing entry)" : ""));
     },
   });
 
@@ -180,10 +224,14 @@ export default function (pi: ExtensionAPI) {
       _ctx: ExtensionContext,
     ): Promise<AgentToolResult<any>> {
       const stats = getStats();
+      // Count entries from the current session
+      const sessionCount = searchMemories("", 999)
+        .filter(e => e.sessionId === process.env.PI_SESSION_ID).length;
       const lines: string[] = [
         `\u{1F9E0} Pi Memory Stats`,
         `Total entries: ${stats.total}`,
         `Storage: ${getStorePath()}`,
+        `This session: ${sessionCount} entries stored`,
         ``,
         `By category:`,
       ];
@@ -205,10 +253,73 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ── Register: memory_update tool ──────────────────────────────────────────
+
+  pi.registerTool({
+    name: "memory_update",
+    label: "Memory Update",
+    description: "Update an existing memory entry by ID. Use when you need to correct or supplement a previously stored memory.",
+    promptSnippet: "memory_update: Update or supplement an existing memory entry",
+    parameters: Type.Object({
+      id: Type.String({ description: "ID of the memory to update (from memory_search results)" }),
+      content: Type.Optional(Type.String({ description: "New content (replace existing)" })),
+      importance: Type.Optional(Type.Number({ description: "New importance 1-5" })),
+      tags: Type.Optional(Type.String({ description: "New comma-separated tags" })),
+    }),
+    async execute(
+      _id: string,
+      params: { id: string; content?: string; importance?: number; tags?: string },
+      _sig: AbortSignal | undefined,
+      _up: AgentToolUpdateCallback<any> | undefined,
+      _ctx: ExtensionContext,
+    ): Promise<AgentToolResult<any>> {
+      const updates: Record<string, any> = {};
+      if (params.content) updates.content = params.content;
+      if (params.importance) updates.importance = Math.min(5, Math.max(1, params.importance));
+      if (params.tags) updates.tags = params.tags.split(",").map(t => t.trim()).filter(Boolean);
+
+      const result = updateMemory(params.id, updates);
+      if (!result) {
+        return textResult(`Memory ${params.id} not found. Use memory_search to find valid IDs.`);
+      }
+
+      if (_ctx?.hasUI) {
+        _ctx.ui.notify(`\u{1F9E0} Updated: ${result.topic}`, "info");
+      }
+
+      return textResult(`Updated memory ${params.id}: ${result.topic}`);
+    },
+  });
+
+  // ── Register: memory_delete tool ──────────────────────────────────────────
+
+  pi.registerTool({
+    name: "memory_delete",
+    label: "Memory Delete",
+    description: "Delete a memory entry by ID. Irreversible — use with care.",
+    promptSnippet: "memory_delete: Remove a memory entry from the store",
+    parameters: Type.Object({
+      id: Type.String({ description: "ID of the memory to delete (from memory_search results)" }),
+    }),
+    async execute(
+      _id: string,
+      params: { id: string },
+      _sig: AbortSignal | undefined,
+      _up: AgentToolUpdateCallback<any> | undefined,
+      _ctx: ExtensionContext,
+    ): Promise<AgentToolResult<any>> {
+      const ok = deleteMemory(params.id);
+      if (!ok) {
+        return textResult(`Memory ${params.id} not found.`);
+      }
+      return textResult(`Deleted memory ${params.id}.`);
+    },
+  });
+
   // ── Register: /memory command ──────────────────────────────────────────────
 
   pi.registerCommand("memory", {
-    description: "Show pi-memory status and recent entries",
+    description: "Show pi-memory status and recent entries. Usage: /memory [stats|search <query>|export|prune]",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const stats = getStats();
       const parts = args.trim().toLowerCase();
@@ -224,11 +335,19 @@ export default function (pi: ExtensionAPI) {
         const query = parts.slice(7);
         const results = searchMemories(query, 5);
         const msg = results.length
-          ? results.map(m => `[${m.category}] ${m.topic}`).join("\n")
+          ? results.map(m => `[${m.importance}★] ${m.topic}`).join("\n")
           : "No results.";
         if (ctx.hasUI) ctx.ui.notify(msg, "info");
+      } else if (parts === "export") {
+        const json = exportMemories();
+        const outPath = path.join(getStorePath(), "..", `pi-memory-export-${Date.now()}.json`);
+        fs.writeFileSync(outPath, json, "utf-8");
+        if (ctx.hasUI) ctx.ui.notify(`\u{1F9E0} Exported to ${outPath}`, "info");
+      } else if (parts === "prune") {
+        const pruned = pruneOldMemories(90, 3);
+        if (ctx.hasUI) ctx.ui.notify(`\u{1F9E0} Pruned ${pruned} old low-importance entries`, "info");
       } else {
-        if (ctx.hasUI) ctx.ui.notify("Usage: /memory [stats|search <query>]", "info");
+        if (ctx.hasUI) ctx.ui.notify("Usage: /memory [stats|search <query>|export|prune]", "info");
       }
     },
   });
