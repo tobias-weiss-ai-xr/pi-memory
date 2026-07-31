@@ -98,7 +98,7 @@ export default function (pi: ExtensionAPI) {
   function getGitBranch(cwd: string): string {
     try {
       const { execSync } = require("node:child_process");
-      return execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf-8", timeout: 2000 }).trim();
+      return execSync("git rev-parse --abbrev-ref HEAD 2>/dev/null", { cwd, encoding: "utf-8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim();
     } catch { return ""; }
   }
 
